@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,7 +16,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/log"
-	"github.com/fsnotify/fsnotify"
 	runewidth "github.com/mattn/go-runewidth"
 	"github.com/muesli/reflow/ansi"
 	"github.com/muesli/reflow/truncate"
@@ -30,7 +31,7 @@ var pagerHelpHeight int
 
 type (
 	contentRenderedMsg string
-	reloadMsg          struct{}
+	fetchedMarkdownMsg *markdown
 )
 
 type pagerState int
@@ -52,8 +53,6 @@ type pagerModel struct {
 	// Current document being rendered, sans-glamour rendering. We cache
 	// it here so we can re-render it on resize.
 	currentDocument markdown
-
-	watcher *fsnotify.Watcher
 }
 
 func newPagerModel(common *commonModel) pagerModel {
@@ -65,7 +64,6 @@ func newPagerModel(common *commonModel) pagerModel {
 		state:    pagerStateBrowse,
 		viewport: vp,
 	}
-	m.initWatcher()
 	return m
 }
 
@@ -98,8 +96,8 @@ type pagerStatusMessage struct {
 	isError bool
 }
 
-// Perform stuff that needs to happen after a successful markdown stash. Note
-// that the returned command should be sent back the through the pager
+// showStatusMessage shows a transient message in the pager's status bar. Note
+// that the returned command should be sent back through the pager
 // update function.
 func (m *pagerModel) showStatusMessage(msg pagerStatusMessage) tea.Cmd {
 	// Show a success message to the user
@@ -110,21 +108,7 @@ func (m *pagerModel) showStatusMessage(msg pagerStatusMessage) tea.Cmd {
 	}
 	m.statusMessageTimer = time.NewTimer(statusMessageTimeout)
 
-	return waitForStatusMessageTimeout(pagerContext, m.statusMessageTimer)
-}
-
-func (m *pagerModel) unload() {
-	log.Debug("unload")
-	if m.showHelp {
-		m.toggleHelp()
-	}
-	if m.statusMessageTimer != nil {
-		m.statusMessageTimer.Stop()
-	}
-	m.state = pagerStateBrowse
-	m.viewport.SetContent("")
-	m.viewport.SetYOffset(0)
-	m.unwatchFile()
+	return waitForStatusMessageTimeout(m.statusMessageTimer)
 }
 
 func (m pagerModel) update(msg tea.Msg) (pagerModel, tea.Cmd) {
@@ -181,13 +165,7 @@ func (m pagerModel) update(msg tea.Msg) (pagerModel, tea.Cmd) {
 	// Glow has rendered the content
 	case contentRenderedMsg:
 		log.Info("content rendered", "state", m.state)
-
 		m.setContent(string(msg))
-		cmds = append(cmds, m.watchFile)
-
-	// The file was changed on disk and we're reloading it
-	case reloadMsg:
-		return m, loadLocalMarkdown(&m.currentDocument)
 
 	// We've finished editing the document, potentially making changes. Let's
 	// retrieve the latest version of the document so that we display
@@ -304,8 +282,7 @@ func (m pagerModel) helpView() (s string) {
 		"c       copy contents",
 		"e       edit this document",
 		"r       reload this document",
-		"esc     back to files",
-		"q       quit",
+		"esc/q   quit",
 	}
 
 	s += "\n"
@@ -412,58 +389,22 @@ func glamourRender(m pagerModel, markdown string) (string, error) {
 
 	return content.String(), nil
 }
-
-func (m *pagerModel) initWatcher() {
-	var err error
-	m.watcher, err = fsnotify.NewWatcher()
-	if err != nil {
-		log.Error("error creating fsnotify watcher", "error", err)
-	}
-}
-
-func (m *pagerModel) watchFile() tea.Msg {
-	dir := m.localDir()
-
-	if err := m.watcher.Add(dir); err != nil {
-		log.Error("error adding dir to fsnotify watcher", "error", err)
-		return nil
-	}
-
-	log.Info("fsnotify watching dir", "dir", dir)
-
-	for {
-		select {
-		case event, ok := <-m.watcher.Events:
-			if !ok || event.Name != m.currentDocument.localPath {
-				continue
-			}
-
-			if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) {
-				continue
-			}
-
-			log.Debug("fsnotify event", "file", event.Name, "event", event.Op)
-			return reloadMsg{}
-		case err, ok := <-m.watcher.Errors:
-			if !ok {
-				continue
-			}
-			log.Debug("fsnotify error", "dir", dir, "error", err)
+func loadLocalMarkdown(md *markdown) tea.Cmd {
+	return func() tea.Msg {
+		if md.localPath == "" {
+			return errMsg{errors.New("could not load file: missing path")}
 		}
+
+		data, err := os.ReadFile(md.localPath)
+		if err != nil {
+			log.Debug("error reading local file", "error", err)
+			return errMsg{err}
+		}
+		md.Body = string(data)
+		return fetchedMarkdownMsg(md)
 	}
 }
 
-func (m *pagerModel) unwatchFile() {
-	dir := m.localDir()
-
-	err := m.watcher.Remove(dir)
-	if err == nil {
-		log.Debug("fsnotify dir unwatched", "dir", dir)
-	} else {
-		log.Error("fsnotify fail to unwatch dir", "dir", dir, "error", err)
-	}
-}
-
-func (m *pagerModel) localDir() string {
-	return filepath.Dir(m.currentDocument.localPath)
+func glowLogoView(styles Styles) string {
+	return styles.logoStyle.Render(" Glow ")
 }

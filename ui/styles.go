@@ -30,11 +30,8 @@ type Styles struct {
 	dimDullFuchsiaFg func(...string) string
 	redFg            func(...string) string
 
-	tabStyle         lipgloss.Style
-	selectedTabStyle lipgloss.Style
-	errorTitleStyle  lipgloss.Style
-	subtleStyle      lipgloss.Style
-	paginationStyle  lipgloss.Style
+	errorTitleStyle lipgloss.Style
+	subtleStyle     lipgloss.Style
 
 	statusBarScrollPosStyle        func(...string) string
 	statusBarNoteStyle             func(...string) string
@@ -45,11 +42,7 @@ type Styles struct {
 	helpViewStyle                  func(...string) string
 	lineNumberStyle                func(...string) string
 
-	dividerDot            lipgloss.Style
-	dividerBar            lipgloss.Style
-	logoStyle             lipgloss.Style
-	stashSpinnerStyle     lipgloss.Style
-	stashInputPromptStyle lipgloss.Style
+	logoStyle lipgloss.Style
 }
 
 // newStyles builds all styles for the given terminal background.
@@ -64,7 +57,6 @@ func newStyles(isDark bool) Styles {
 	brightGray := s.adaptive("#847A85", "#979797")
 	dimBrightGray := s.adaptive("#C2B8C2", "#4D4D4D")
 	cream := s.adaptive("#FFFDF5", "#FFFDF5")
-	yellowGreen := s.adaptive("#04B575", "#ECFD65")
 	s.fuchsia = s.adaptive("#EE6FF8", "#EE6FF8")
 	dimFuchsia := s.adaptive("#F1A8FF", "#99519E")
 	dullFuchsia := s.adaptive("#F793FF", "#AD58B4")
@@ -98,11 +90,8 @@ func newStyles(isDark bool) Styles {
 	s.redFg = lipgloss.NewStyle().Foreground(red).Render
 
 	// Named styles
-	s.tabStyle = lipgloss.NewStyle().Foreground(s.adaptive("#909090", "#626262"))
-	s.selectedTabStyle = lipgloss.NewStyle().Foreground(s.adaptive("#333333", "#979797"))
 	s.errorTitleStyle = lipgloss.NewStyle().Foreground(cream).Background(red).Padding(0, 1)
 	s.subtleStyle = lipgloss.NewStyle().Foreground(s.adaptive("#9B9B9B", "#5C5C5C"))
-	s.paginationStyle = s.subtleStyle
 
 	// Pager styles
 	s.statusBarScrollPosStyle = lipgloss.NewStyle().
@@ -144,20 +133,10 @@ func newStyles(isDark bool) Styles {
 		Foreground(lineNumberFg).
 		Render
 
-	// Stash styles
-	s.dividerDot = s.darkGrayFg.SetString(" • ")
-	s.dividerBar = s.darkGrayFg.SetString(" │ ")
-
 	s.logoStyle = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#ECFD65")).
 		Background(s.fuchsia).
 		Bold(true)
-
-	s.stashSpinnerStyle = lipgloss.NewStyle().
-		Foreground(gray)
-	s.stashInputPromptStyle = lipgloss.NewStyle().
-		Foreground(yellowGreen).
-		MarginRight(1)
 
 	return s
 }

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,19 +31,16 @@ var (
 	// CommitSHA as provided by goreleaser.
 	CommitSHA = ""
 
-	readmeNames      = []string{"README.md", "README", "Readme.md", "Readme", "readme.md", "readme"}
 	configFile       string
 	pager            bool
-	tui              bool
 	style            string
 	width            uint
-	showAllFiles     bool
 	showLineNumbers  bool
 	preserveNewLines bool
 	mouse            bool
 
 	rootCmd = &cobra.Command{
-		Use:   "glow [SOURCE|DIR]",
+		Use:   "glow [FILE]",
 		Short: "Render markdown on the CLI, with pizzazz!",
 		Long: paragraph(
 			fmt.Sprintf("\nRender markdown on the CLI, %s!", keyword("with pizzazz")),
@@ -75,67 +70,6 @@ func sourceFromArg(arg string) (*source, error) {
 	// from stdin
 	if arg == "-" {
 		return &source{reader: os.Stdin}, nil
-	}
-
-	// a GitHub or GitLab URL (even without the protocol):
-	src, err := readmeURL(arg)
-	if src != nil && err == nil {
-		// if there's an error, try next methods...
-		return src, nil
-	}
-
-	// HTTP(S) URLs:
-	if u, err := url.ParseRequestURI(arg); err == nil && strings.Contains(arg, "://") { //nolint:nestif
-		if u.Scheme != "" {
-			if u.Scheme != "http" && u.Scheme != "https" {
-				return nil, fmt.Errorf("%s is not a supported protocol", u.Scheme)
-			}
-			// consumer of the source is responsible for closing the ReadCloser.
-			resp, err := http.Get(u.String()) //nolint: noctx,bodyclose
-			if err != nil {
-				return nil, fmt.Errorf("unable to get url: %w", err)
-			}
-			if resp.StatusCode != http.StatusOK {
-				return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
-			}
-			return &source{resp.Body, u.String()}, nil
-		}
-	}
-
-	// a directory:
-	if len(arg) == 0 {
-		// use the current working dir if no argument was supplied
-		arg = "."
-	}
-	st, err := os.Stat(arg)
-	if err == nil && st.IsDir() { //nolint:nestif
-		var src *source
-		_ = filepath.Walk(arg, func(path string, _ os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			for _, v := range readmeNames {
-				if strings.EqualFold(filepath.Base(path), v) {
-					r, err := os.Open(path)
-					if err != nil {
-						continue
-					}
-
-					u, _ := filepath.Abs(path)
-					src = &source{r, u}
-
-					// abort filepath.Walk
-					return errors.New("source found")
-				}
-			}
-			return nil
-		})
-
-		if src != nil {
-			return src, nil
-		}
-
-		return nil, errors.New("missing markdown source")
 	}
 
 	r, err := os.Open(arg)
@@ -168,14 +102,8 @@ func validateOptions(cmd *cobra.Command) error {
 	width = viper.GetUint("width")
 	mouse = viper.GetBool("mouse")
 	pager = viper.GetBool("pager")
-	tui = viper.GetBool("tui")
-	showAllFiles = viper.GetBool("all")
 	preserveNewLines = viper.GetBool("preserveNewLines")
 	showLineNumbers = viper.GetBool("showLineNumbers")
-
-	if pager && tui {
-		return errors.New("cannot use both pager and tui")
-	}
 
 	// validate the glamour style
 	style = viper.GetString("style")
@@ -232,24 +160,8 @@ func execute(cmd *cobra.Command, args []string) error {
 	}
 
 	switch len(args) {
-	// TUI running on cwd
 	case 0:
-		return runTUI("", "")
-
-	// TUI with possible dir argument
-	case 1:
-		// Validate that the argument is a directory. If it's not treat it as
-		// an argument to the non-TUI version of Glow (via fallthrough).
-		info, err := os.Stat(args[0])
-		if err == nil && info.IsDir() {
-			p, err := filepath.Abs(args[0])
-			if err == nil {
-				return runTUI(p, "")
-			}
-		}
-		fallthrough
-
-	// CLI
+		return errors.New("missing markdown source")
 	default:
 		for _, arg := range args {
 			if err := executeArg(cmd, arg, os.Stdout); err != nil {
@@ -279,21 +191,12 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 
 	b = utils.RemoveFrontmatter(b)
 
-	// render
-	var baseURL string
-	u, err := url.ParseRequestURI(src.URL)
-	if err == nil {
-		u.Path = filepath.Dir(u.Path)
-		baseURL = u.String() + "/"
-	}
-
 	isCode := !utils.IsMarkdownFile(src.URL)
 
 	// initialize glamour
 	r, err := glamour.NewTermRenderer(
 		utils.GlamourStyle(style, isCode),
 		glamour.WithWordWrap(int(width)), //nolint:gosec
-		glamour.WithBaseURL(baseURL),
 		glamour.WithPreservedNewLines(),
 	)
 	if err != nil {
@@ -314,8 +217,7 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 	out = utils.ApplyTextSizing(out)
 
 	// display
-	switch {
-	case pager || cmd.Flags().Changed("pager"):
+	if pager || cmd.Flags().Changed("pager") {
 		pagerCmd := os.Getenv("PAGER")
 		if pagerCmd == "" {
 			pagerCmd = "less -r"
@@ -332,18 +234,18 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 			return fmt.Errorf("unable to run command: %w", err)
 		}
 		return nil
-	case tui || cmd.Flags().Changed("tui"):
-		path := ""
-		if !isURL(src.URL) {
-			path = src.URL
-		}
-		return runTUI(path, content)
-	default:
-		if _, err = fmt.Fprint(w, out); err != nil {
-			return fmt.Errorf("unable to write to writer: %w", err)
-		}
-		return nil
 	}
+
+	// The TUI viewer is the default when stdout is a terminal; otherwise
+	// print the rendered output so pipes and redirects keep working.
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		return runTUI(src.URL, content)
+	}
+
+	if _, err = fmt.Fprint(w, out); err != nil {
+		return fmt.Errorf("unable to write to writer: %w", err)
+	}
+	return nil
 }
 
 func runTUI(path string, content string) error {
@@ -362,7 +264,6 @@ func runTUI(path string, content string) error {
 	}
 
 	cfg.Path = path
-	cfg.ShowAllFiles = showAllFiles
 	cfg.ShowLineNumbers = showLineNumbers
 	cfg.GlamourMaxWidth = width
 	cfg.EnableMouse = mouse
@@ -406,31 +307,24 @@ func init() {
 	// "Glow Classic" cli arguments
 	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", fmt.Sprintf("config file (default %s)", viper.GetViper().ConfigFileUsed()))
 	rootCmd.Flags().BoolVarP(&pager, "pager", "p", false, "display with pager")
-	rootCmd.Flags().BoolVarP(&tui, "tui", "t", false, "display with tui")
 	rootCmd.Flags().StringVarP(&style, "style", "s", "auto", "style name or JSON path")
 	rootCmd.Flags().UintVarP(&width, "width", "w", 0, "word-wrap at width (set to 0 to disable)")
-	rootCmd.Flags().BoolVarP(&showAllFiles, "all", "a", false, "show system files and directories (TUI-mode only)")
 	rootCmd.Flags().BoolVarP(&showLineNumbers, "line-numbers", "l", false, "show line numbers (TUI-mode only)")
 	rootCmd.Flags().BoolVarP(&preserveNewLines, "preserve-new-lines", "n", false, "preserve newlines in the output")
 	rootCmd.Flags().BoolVarP(&mouse, "mouse", "m", false, "enable mouse wheel (TUI-mode only)")
 	_ = rootCmd.Flags().MarkHidden("mouse")
-
 	// Config bindings
 	_ = viper.BindPFlag("pager", rootCmd.Flags().Lookup("pager"))
-	_ = viper.BindPFlag("tui", rootCmd.Flags().Lookup("tui"))
 	_ = viper.BindPFlag("style", rootCmd.Flags().Lookup("style"))
 	_ = viper.BindPFlag("width", rootCmd.Flags().Lookup("width"))
 	_ = viper.BindPFlag("debug", rootCmd.Flags().Lookup("debug"))
 	_ = viper.BindPFlag("mouse", rootCmd.Flags().Lookup("mouse"))
 	_ = viper.BindPFlag("preserveNewLines", rootCmd.Flags().Lookup("preserve-new-lines"))
 	_ = viper.BindPFlag("showLineNumbers", rootCmd.Flags().Lookup("line-numbers"))
-	_ = viper.BindPFlag("all", rootCmd.Flags().Lookup("all"))
 
 	viper.SetDefault("style", "auto")
 	viper.SetDefault("width", 0)
-	viper.SetDefault("all", true)
 
-	rootCmd.AddCommand(configCmd, manCmd)
 }
 
 func tryLoadConfigFromDefaultPlaces() {
@@ -471,8 +365,5 @@ func tryLoadConfigFromDefaultPlaces() {
 
 	if viper.ConfigFileUsed() == "" {
 		configFile = filepath.Join(dirs[0], "glow.yml")
-	}
-	if err := ensureConfigFile(); err != nil {
-		log.Error("Could not create default configuration", "error", err)
 	}
 }
